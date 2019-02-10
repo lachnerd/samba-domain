@@ -1,554 +1,110 @@
-# Samba Active Directory Domain Controller for Docker
+## samba-dc
+[![](https://images.microbadger.com/badges/version/instantlinux/samba-dc.svg)](https://microbadger.com/images/instantlinux/samba-dc "Version badge") [![](https://images.microbadger.com/badges/image/instantlinux/samba-dc.svg)](https://microbadger.com/images/instantlinux/samba-dc "Image badge") [![](https://images.microbadger.com/badges/commit/instantlinux/samba-dc.svg)](https://microbadger.com/images/instantlinux/samba-dc "Commit badge")
 
-A well documented, tried and tested Samba Active Directory Domain Controller that works with the standard Windows management tools; built from scratch using internal DNS and kerberos and not based on existing containers.
+Samba domain controller.
 
-## Environment variables for quick start
-* `DOMAIN` defaults to `CORP.EXAMPLE.COM` and should be set to your domain
-* `DOMAINPASS` should be set to your administrator password, be it existing or new. This can be removed from the environment after the first setup run.
-* `HOSTIP` can be set to the IP you want to advertise.
-* `JOIN` defaults to `false` and means the container will provision a new domain. Set this to `true` to join an existing domain.
-* `JOINSITE` is optional and can be set to a site name when joining a domain, otherwise the default site will be used.
-* `DNSFORWARDER` is optional and if an IP such as `192.168.0.1` is supplied will forward all DNS requests samba can't resolve to that DNS server
-* `INSECURELDAP` defaults to `false`. When set to true, it removes the secure LDAP requirement. While this is not recommended for production it is required for some LDAP tools. You can remove it later from the smb.conf file stored in the config directory.
-* `MULTISITE` defaults to `false` and tells the container to connect to an OpenVPN site via an ovpn file with no password. For instance, if you have two locations where you run your domain controllers, they need to be able to interact. The VPN allows them to do that.
-* `NOCOMPLEXITY` defaults to `false`. When set to `true` it removes password complexity requirements including `complexity, history-length, min-pwd-age, max-pwd-age`
+### Usage
+The most-common directives can be specified in environment variables as shown below.  If you need further customizations, put them in one or more files under mount point /etc/samba.d.
 
-## Volumes for quick start
-* `/etc/localtime:/etc/localtime:ro` - Sets the timezone to match the host
-* `/data/docker/containers/samba/data/:/var/lib/samba` - Stores samba data so the container can be moved to another host if required.
-* `/data/docker/containers/samba/config/samba:/etc/samba/external` - Stores the smb.conf so the container can be mored or updates can be easily made.
-* `/data/docker/containers/samba/config/openvpn/docker.ovpn:/docker.ovpn` - Optional for connecting to another site via openvpn.
-* `/data/docker/containers/samba/config/openvpn/credentials:/credentials` - Optional for connecting to another site via openvpn that requires a username/password. The format for this file should be two lines, with the username on the first, and the password on the second. Also, make sure your ovpn file contains `auth-user-pass /credentials`
+Basic requirements:
 
-## Downloading and building
+* A Domain Controller must have a static IP address and persistent DNS entry
+* This container must be run in network_mode:host
+* A NETBIOS_NAME or hostname must be specified, which becomes the netbios name.
+
+The directories /etc/samba and /var/lib/samba must be mounted as persistent volumes. If /var/lib/samba is empty, the "provision" or "join" action specified in DOMAIN_ACTION variable will be taken.
+
+The most-common directives can be specified in environment variables as shown below. If you need further customizations, put them in one or more files under mount point /etc/samba/conf.d. If you want to add global settings, put those into the first file with a name like 0globals.conf -- they will be appended in alphabetical-sort sequence.
+
+Test your configuration and/or manage contents of your directory using Apache Directory Studio. Make a connection on port 636 with method SSL encryption (ldaps); specify simple authentication with username <realm prefix>\<your name>. The ldaps certificate is self-signed so you'll need to accept it first.
+
+This repo has complete instructions for
+[building a kubernetes cluster](https://github.com/instantlinux/docker-tools/blob/master/k8s/README.md) where you can deploy [kubernetes.yaml](https://github.com/instantlinux/docker-tools/blob/master/images/samba-dc/kubernetes.yaml) with the Makefile or:
+~~~
+cat kubernetes.yaml | envsubst | kubectl apply -f -
+~~~
+
+### Status
+* The "join" command is tested as a spare domain controller against Active Directory running on Windows Server 2008, and against other samba4 domain controllers.
+* The "provision" is tested as a Samba4 domain controller with a Windows 7 client.
+* The "BIND_INTERFACES_ONLY" option is working now.
+* It is very difficult to get multiple instances of samba-dc replicating with one another. I've given up on it as of version 4.8.8; perhaps a future version will fix these poblems.
+
+### Variables
+Variable | Default | Description |
+-------- | ------- | ----------- |
+ADMIN_PASSWORD_SECRET | samba-admin-password | admin secret, see below
+ALLOW_DNS_UPDATES | secure | enable DNS updates
+BIND_INTERFACES_ONLY | yes | specify IP addresses or interfaces
+DOMAIN_ACTION | provision | set to 'join' if existing domain
+DOMAIN_LOGONS | yes | support workgroup login
+DOMAIN_MASTER | no | "WAN-wide browse list collation"--haha, see [man page](https://www.samba.org/samba/docs/man/manpages-3/smb.conf.5.html)
+INTERFACES | lo eth0 | list of IP addresses or interfaces
+LOG_LEVEL | 1 | log verbosity
+MODEL | standard | process model: single, standard, thread
+NETBIOS_NAME | (hostname -s) | the NETBIOS name
+REALM | ad.example.com | active-directory DNS realm
+SERVER_STRING | Samba Domain Controller | server identity
+TZ | UTC | local timezone
+WINBIND_USE_DEFAULT_DOMAIN | yes | allow username without domain component
+WORKGROUP | WORKGROUP | NT workgroup
+
+### Secrets
+This is only needed at first run, for samba domain provision or join. Do NOT leave your domain-controller administrator secret activated at any other time.
+For clarity, this is a docker-secret with the initial Samba admin password, not the password itself.
+
+Secret | Description
+------ | -----------
+samba-admin-password | domain-administrator pw
+
+### Notes
+Getting a domain-controller cluster up and running properly requires a lot of correctly-configured trust relationships established between domain controllers, and Samba's documentation of error messages and problem-resolutions is pretty thin. If you're only running this version of samba, it's likely there will be few problems. But in a mixed environment with Microsoft Active Directory servers and/or older versions of samba4, you're bound to run into problems that require tweaking. A few diagnostic commands are available within this container; here are notes that might help you get up and running more quickly:
+
+* You need an obscure DNS entry for your new domain controller that sometimes isn't automatically set up via samba-tool: go onto the instance and type the following "magic" to do it:
 ```
-mkdir -p /data/docker/builds
-cd /data/docker/builds
-git clone https://github.com/Fmstrat/samba-domain.git
-cd samba-domain
-docker build -t samba-domain .
+export LDB_MODULES_PATH=/usr/lib/samba/ldb
+ldbsearch -H /var/lib/samba/private/sam.ldb '(invocationid=*)' \
+ --cross-ncs objectguid|grep -i -B 1 -A 1 <new dc hostname>
+samba-tool dns add dc01 _msdcs.ether.ci.net <guid from above> \
+ CNAME <new dc fqdn> -UAdministrator
 ```
 
-Or just use the HUB:
-
+* If you're running with older versions of samba and see any DRS replication errors mentioning LDAP SASL, add this configuration under /etc/samba/conf.d/0global.conf:
 ```
-docker pull nowsci/samba-domain
+ldap server require strong auth = no
 ```
-
-## Setting things up for the container
-To set things up you will first want a new IP on your host machine so that ports don't conflict. A domain controller needs a lot of ports, and will likely conflict with things like dnsmasq. The below commands will do this, and set up some required folders.
-
+* Look for errors in replication:
 ```
-ifconfig eno1:1 192.168.3.222 netmask 255.255.255.0 up
-mkdir -p /data/docker/containers/samba/data
-mkdir -p /data/docker/containers/samba/config/samba
+samba-tool drs showrepl
 ```
-
-If you plan on using a multi-site VPN, also run:
-
+* Check the local databases:
 ```
-mkdir -p /data/docker/containers/samba/config/openvpn
-cp /path/to/my/ovpn/MYSITE.ovpn /data/docker/containers/samba/config/openvpn/docker.ovpn
+samba-tool dbcheck
+samba-tool drs kcc
 ```
-
-## Things to keep in mind
-* In some cases on Windows clients, you would join with the domain of CORP, but when entering the computer domain you must enter CORP.EXAMPLE.COM. This seems to be the case when using most any samba based DC.
-* Make sure your client's DNS is using the DC, or that your mail DNS is relaying for the domain
-* Ensure client's are using corp.example.com as the search suffix
-* If you're using a VPN, pay close attention to routes. You don't want to force all traffic through the VPN
-
-
-## Enabling file sharing
-While the Samba team does not recommend using a DC as a file server, it's understandable that some may wish to. Once the container is up and running and your `/data/docker/containers/samba/config/samba/smb.conf` file is set up after the first run, you can enable shares by shutting down the container, and making the following changes to the `smb.conf` file.
-
-In the `[global]` section, add:
+* Make sure replication works both ways (copy the <NC> names like dc=foo that you see in output of drs showrepl):
 ```
-        security = user
-        passdb backend = ldapsam:ldap://localhost
-        ldap suffix = dc=corp,dc=example,dc=com
-        ldap user suffix = ou=Users
-        ldap group suffix = ou=Groups
-        ldap machine suffix = ou=Computers
-        ldap idmap suffix = ou=Idmap
-        ldap admin dn = cn=Administrator,cn=Users,dc=corp,dc=example,dc=com
-        ldap ssl = off
-        ldap passwd sync = no
-        server string = MYSERVERHOSTNAME
-        wins support = yes
-        preserve case = yes
-        short preserve case = yes
-        default case = lower
-        case sensitive = auto
-        preferred master = yes
-        unix extensions = yes
-        follow symlinks = yes
-        client ntlmv2 auth = yes
-        client lanman auth = yes
-        mangled names = no
+./samba-tool drs replicate dc1 dc2 dc=<foo...>,dc=<suffix> --full-sync
+./samba-tool drs replicate dc2 dc1 dc=<foo...>,dc=<suffix> --full-sync
 ```
-Then add a share to the end based on how you mount the volume:
+* Using nslookup or host, list the DNS records for the new domain controller's FQDN. It should only have one record, with the correct IP address. Get rid of spurious ones and add the correct one using commands like:
 ```
-[storage]
-        comment = storage
-        path = /storage
-        public = no
-        read only = no
-        writable = yes
-        write list = @root NOWSCI\myuser
-        force user = root
-        force group = root
-        guest ok = yes
-        valid users = NOWSCI\myuser
+samba-tool dns add <dc> <domain> <dc> A <ip> -Uadministrator
+samba-tool dns delete <dc> <domain> <dc> A <ip> -Uadministrator
 ```
-Check the samba documentation for how to allow groups/etc.
-
-
-## Keeping things updated
-The container is stateless, so you can do a `docker rmi samba-domain` and then restart the container to rebuild packages when a security update occurs. However, this puts load on servers that isn't always required, so below are some scripts that can help minimize things by letting you know when containers have security updates that are required.
-
-This script loops through running containers and sends you an email when security updates are required.
+* If you're getting "tsig verify failure" for samba_dnsupdate in your logs, run this command manually on each of your controllers to set up the required DNS names for replication. It won't eliminate these errors but at least you can get replication working:
 ```
-#!/bin/bash
-
-
-function needsUpdates() {
-        RESULT=$(docker exec ${1} bash -c ' \
-                if [[ -f /etc/apt/sources.list ]]; then \
-                grep security /etc/apt/sources.list > /tmp/security.list; \
-                apt-get update > /dev/null; \
-                apt-get upgrade -oDir::Etc::Sourcelist=/tmp/security.list -s; \
-                fi; \
-                ')
-        RESULT=$(echo $RESULT)
-        GOODRESULT="Reading package lists... Building dependency tree... Reading state information... Calculating upgrade... 0 upgraded, 0 newly installed, 0 to remove and 0 not upgraded."
-        if [[ "${RESULT}" != "" ]] && [[ "${RESULT}" != "${GOODRESULT}" ]]; then
-                return 0
-        else
-                return 1
-        fi
-}
-
-function sendEmail() {
-        echo "Container ${1} needs security updates";
-        H=`hostname`
-        ssh -i /data/keys/<KEYFILE> <USRER>@<REMOTEHOST>.com "{ echo \"MAIL FROM: root@${H}\"; echo \"RCPT TO: <USER>@<EMAILHOST>.com\"; echo \"DATA\"; echo \"Subject: ${H} - ${1} container needs security update\"; echo \"\"; echo -e \"\n${1} container needs update.\n\n\"; echo -e \"docker exec ${1} bash -c 'grep security /etc/apt/sources.list > /tmp/security.list; apt-get update > /dev/null; apt-get upgrade -oDir::Etc::Sourcelist=/tmp/security.list -s'\n\n\"; echo \"Remove the -s to run the update\"; echo \"\"; echo \".\"; echo \"quit\"; sleep 1; } | telnet <SMTPHOST> 25"
-}
-
-CONTAINERS=$(docker ps --format "{{.Names}}")
-for CONTAINER in $CONTAINERS; do
-        echo "Checking ${CONTAINER}"
-        if needsUpdates $CONTAINER; then
-                sendEmail $CONTAINER
-        fi
+samba_dnsupdate --all-names --use-samba-tool
+```
+* If domain-join fails with "LDAP error 10 LDAP_REFERRAL" with stack trace, there are problably stale DNS records lingering on your existing domain controllers. Look for the FQDN in this error message (looks like ldap://abcdef-abc-xxx._msdcs.your.domain) and remove from ALL of your domain controllers:
+```
+for DC in dc1 dc2 dc3 etc; do
+  samba-tool dns delete $DC _msdcs.<domain> abcdef-abc-xxx CNAME <host> -Uadministrator
 done
 ```
+* With docker it's real easy to get a bunch of stale entries in your domain controller list. The latest version of samba4 provides a way to prune them:
+{noformat}
+samba-tool domain demote --remove-other-dead-server=xxx
+{noformat}
 
-And the following script keeps track of when new images are posted to hub.docker.com.
-```
-#!/bin/bash
-
-DATAPATH='/data/docker/updater/data'
-
-if [ ! -d "${DATAPATH}" ]; then
-        mkdir "${DATAPATH}";
-fi
-IMAGES=$(docker ps --format "{{.Image}}")
-for IMAGE in $IMAGES; do
-        ORIGIMAGE=${IMAGE}
-        if [[ "$IMAGE" != *\/* ]]; then
-                IMAGE=library/${IMAGE}
-        fi
-        IMAGE=${IMAGE%%:*}
-        echo "Checking ${IMAGE}"
-        PARSED=${IMAGE//\//.}
-        if [ ! -f "${DATAPATH}/${PARSED}" ]; then
-                # File doesn't exist yet, make baseline
-                echo "Setting baseline for ${IMAGE}"
-                curl -s "https://registry.hub.docker.com/v2/repositories/${IMAGE}/tags/" > "${DATAPATH}/${PARSED}"
-        else
-                # File does exist, do a compare
-                NEW=$(curl -s "https://registry.hub.docker.com/v2/repositories/${IMAGE}/tags/")
-                OLD=$(cat "${DATAPATH}/${PARSED}")
-                if [[ "${OLD}" == "${NEW}" ]]; then
-                        echo "Image ${IMAGE} is up to date";
-                else
-                        echo ${NEW} > "${DATAPATH}/${PARSED}"
-                        echo "Image ${IMAGE} needs to be updated";
-                        H=`hostname`
-                        ssh -i /data/keys/<KEYFILE> <USER>@<REMOTEHOST>.com "{ echo \"MAIL FROM: root@${H}\"; echo \"RCPT TO: <USER>@<EMAILHOST>.com\"; echo \"DATA\"; echo \"Subject: ${H} - ${IMAGE} needs update\"; echo \"\"; echo -e \"\n${IMAGE} needs update.\n\ndocker pull ${ORIGIMAGE}\"; echo \"\"; echo \".\"; echo \"quit\"; sleep 1; } | telnet <SMTPHOST> 25"
-                fi
-
-        fi
-done;
-```
-
-# Examples with docker run
-Keep in mind, for all examples replace `nowsci/samba-domain` with `samba-domain` if you build your own from GitHub.
-
-Start a new domain, and forward non-resolvable queries to the main DNS server
-* Local site is `192.168.3.0`
-* Local DC (this one) hostname is `LOCALDC` using the host IP of `192.168.3.222`
-* Local main DNS is running on `192.168.3.1`
-
-```
-docker run -t -i \
-	-e "DOMAIN=CORP.EXAMPLE.COM" \
-	-e "DOMAINPASS=ThisIsMyAdminPassword" \
-	-e "DNSFORWARDER=192.168.3.1" \
-	-e "HOSTIP=192.168.3.222" \
-	-p 192.168.3.222:53:53 \
-	-p 192.168.3.222:53:53/udp \
-	-p 192.168.3.222:88:88 \
-	-p 192.168.3.222:88:88/udp \
-	-p 192.168.3.222:135:135 \
-	-p 192.168.3.222:137-138:137-138/udp \
-	-p 192.168.3.222:139:139 \
-	-p 192.168.3.222:389:389 \
-	-p 192.168.3.222:389:389/udp \
-	-p 192.168.3.222:445:445 \
-	-p 192.168.3.222:464:464 \
-	-p 192.168.3.222:464:464/udp \
-	-p 192.168.3.222:636:636 \
-	-p 192.168.3.222:1024-1044:1024-1044 \
-	-p 192.168.3.222:3268-3269:3268-3269 \
-	-v /etc/localtime:/etc/localtime:ro \
-	-v /data/docker/containers/samba/data/:/var/lib/samba \
-	-v /data/docker/containers/samba/config/samba:/etc/samba/external \
-	--dns-search corp.example.com \
-	--dns 192.168.3.222 \
-	--dns 192.168.3.1 \
-	--add-host localdc.corp.example.com:192.168.3.222 \
-	-h localdc \
-	--name samba \
-	--privileged \
-	nowsci/samba-domain
-```
-
-Join an existing domain, and forward non-resolvable queries to the main DNS server
-* Local site is `192.168.3.0`
-* Local DC (this one) hostname is `LOCALDC` using the host IP of `192.168.3.222`
-* Local existing DC is running DNS and has IP of `192.168.3.201`
-* Local main DNS is running on `192.168.3.1`
-
-```
-docker run -t -i \
-	-e "DOMAIN=CORP.EXAMPLE.COM" \
-	-e "DOMAINPASS=ThisIsMyAdminPassword" \
-	-e "JOIN=true" \
-	-e "DNSFORWARDER=192.168.3.1" \
-	-e "HOSTIP=192.168.3.222" \
-	-p 192.168.3.222:53:53 \
-	-p 192.168.3.222:53:53/udp \
-	-p 192.168.3.222:88:88 \
-	-p 192.168.3.222:88:88/udp \
-	-p 192.168.3.222:135:135 \
-	-p 192.168.3.222:137-138:137-138/udp \
-	-p 192.168.3.222:139:139 \
-	-p 192.168.3.222:389:389 \
-	-p 192.168.3.222:389:389/udp \
-	-p 192.168.3.222:445:445 \
-	-p 192.168.3.222:464:464 \
-	-p 192.168.3.222:464:464/udp \
-	-p 192.168.3.222:636:636 \
-	-p 192.168.3.222:1024-1044:1024-1044 \
-	-p 192.168.3.222:3268-3269:3268-3269 \
-	-v /etc/localtime:/etc/localtime:ro \
-	-v /data/docker/containers/samba/data/:/var/lib/samba \
-	-v /data/docker/containers/samba/config/samba:/etc/samba/external \
-	--dns-search corp.example.com \
-	--dns 192.168.3.222 \
-	--dns 192.168.3.1 \
-	--dns 192.168.3.201 \
-	--add-host localdc.corp.example.com:192.168.3.222 \
-	-h localdc \
-	--name samba \
-	--privileged \
-	nowsci/samba-domain
-```
-
-Join an existing domain, forward DNS, remove security features, and connect to a remote site via openvpn
-* Local site is `192.168.3.0`
-* Local DC (this one) hostname is `LOCALDC` using the host IP of `192.168.3.222`
-* Local existing DC is running DNS and has IP of `192.168.3.201`
-* Local main DNS is running on `192.168.3.1`
-* Remote site is `192.168.6.0`
-* Remote DC hostname is `REMOTEDC` with IP of `192.168.6.222` (notice the DNS and host entries)
-
-```
-docker run -t -i \
-	-e "DOMAIN=CORP.EXAMPLE.COM" \
-	-e "DOMAINPASS=ThisIsMyAdminPassword" \
-	-e "JOIN=true" \
-	-e "DNSFORWARDER=192.168.3.1" \
-	-e "MULTISITE=true" \
-	-e "NOCOMPLEXITY=true" \
-	-e "INSECURELDAP=true" \
-	-e "HOSTIP=192.168.3.222" \
-	-p 192.168.3.222:53:53 \
-	-p 192.168.3.222:53:53/udp \
-	-p 192.168.3.222:88:88 \
-	-p 192.168.3.222:88:88/udp \
-	-p 192.168.3.222:135:135 \
-	-p 192.168.3.222:137-138:137-138/udp \
-	-p 192.168.3.222:139:139 \
-	-p 192.168.3.222:389:389 \
-	-p 192.168.3.222:389:389/udp \
-	-p 192.168.3.222:445:445 \
-	-p 192.168.3.222:464:464 \
-	-p 192.168.3.222:464:464/udp \
-	-p 192.168.3.222:636:636 \
-	-p 192.168.3.222:1024-1044:1024-1044 \
-	-p 192.168.3.222:3268-3269:3268-3269 \
-	-v /etc/localtime:/etc/localtime:ro \
-	-v /data/docker/containers/samba/data/:/var/lib/samba \
-	-v /data/docker/containers/samba/config/samba:/etc/samba/external \
-	-v /data/docker/containers/samba/config/openvpn/docker.ovpn:/docker.ovpn \
-	-v /data/docker/containers/samba/config/openvpn/credentials:/credentials \
-	--dns-search corp.example.com \
-	--dns 192.168.3.222 \
-	--dns 192.168.3.1 \
-	--dns 192.168.6.222 \
-	--dns 192.168.3.201 \
-	--add-host localdc.corp.example.com:192.168.3.222 \
-	--add-host remotedc.corp.example.com:192.168.6.222 \
-	--add-host remotedc:192.168.6.222 \
-	-h localdc \
-	--name samba \
-	--privileged \
-	--cap-add=NET_ADMIN --device /dev/net/tun \
-	nowsci/samba-domain
-```
-
-
-# Examples with docker compose
-
-Keep in mind for all examples `DOMAINPASS` can be removed after the first run.
-
-Start a new domain, and forward non-resolvable queries to the main DNS server
-* Local site is `192.168.3.0`
-* Local DC (this one) hostname is `LOCALDC` using the host IP of `192.168.3.222`
-* Local main DNS is running on `192.168.3.1`
-
-```
-version: '2'
-
-networks:
-  extnet:
-    external: true
-
-services:
-
-# ----------- samba begin ----------- #
-
-  samba:
-    image: nowsci/samba-domain
-    container_name: samba
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /data/docker/containers/samba/data/:/var/lib/samba
-      - /data/docker/containers/samba/config/samba:/etc/samba/external
-    environment:
-      - DOMAIN=CORP.EXAMPLE.COM
-      - DOMAINPASS=ThisIsMyAdminPassword
-      - DNSFORWARDER=192.168.3.1
-      - HOSTIP=192.168.3.222
-    networks:
-      - extnet
-    ports:
-      - 192.168.3.222:53:53
-      - 192.168.3.222:53:53/udp
-      - 192.168.3.222:88:88
-      - 192.168.3.222:88:88/udp
-      - 192.168.3.222:135:135
-      - 192.168.3.222:137-138:137-138/udp
-      - 192.168.3.222:139:139
-      - 192.168.3.222:389:389
-      - 192.168.3.222:389:389/udp
-      - 192.168.3.222:445:445
-      - 192.168.3.222:464:464
-      - 192.168.3.222:464:464/udp
-      - 192.168.3.222:636:636
-      - 192.168.3.222:1024-1044:1024-1044
-      - 192.168.3.222:3268-3269:3268-3269
-    dns_search:
-      - corp.example.com
-    dns:
-      - 192.168.3.222
-      - 192.168.3.1
-    extra_hosts:
-      - localdc.corp.example.com:192.168.3.222
-    hostname: localdc
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun
-    privileged: true
-    restart: always
-
-# ----------- samba end ----------- #
-```
-
-Join an existing domain, and forward non-resolvable queries to the main DNS server
-* Local site is `192.168.3.0`
-* Local DC (this one) hostname is `LOCALDC` using the host IP of `192.168.3.222`
-* Local existing DC is running DNS and has IP of `192.168.3.201`
-* Local main DNS is running on `192.168.3.1`
-
-```
-version: '2'
-
-networks:
-  extnet:
-    external: true
-
-services:
-
-# ----------- samba begin ----------- #
-
-  samba:
-    image: nowsci/samba-domain
-    container_name: samba
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /data/docker/containers/samba/data/:/var/lib/samba
-      - /data/docker/containers/samba/config/samba:/etc/samba/external
-    environment:
-      - DOMAIN=CORP.EXAMPLE.COM
-      - DOMAINPASS=ThisIsMyAdminPassword
-      - JOIN=true
-      - DNSFORWARDER=192.168.3.1
-      - HOSTIP=192.168.3.222
-    networks:
-      - extnet
-    ports:
-      - 192.168.3.222:53:53
-      - 192.168.3.222:53:53/udp
-      - 192.168.3.222:88:88
-      - 192.168.3.222:88:88/udp
-      - 192.168.3.222:135:135
-      - 192.168.3.222:137-138:137-138/udp
-      - 192.168.3.222:139:139
-      - 192.168.3.222:389:389
-      - 192.168.3.222:389:389/udp
-      - 192.168.3.222:445:445
-      - 192.168.3.222:464:464
-      - 192.168.3.222:464:464/udp
-      - 192.168.3.222:636:636
-      - 192.168.3.222:1024-1044:1024-1044
-      - 192.168.3.222:3268-3269:3268-3269
-    dns_search:
-      - corp.example.com
-    dns:
-      - 192.168.3.222
-      - 192.168.3.1
-      - 192.168.3.201
-    extra_hosts:
-      - localdc.corp.example.com:192.168.3.222
-    hostname: localdc
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun
-    privileged: true
-    restart: always
-
-# ----------- samba end ----------- #
-```
-
-Join an existing domain, forward DNS, remove security features, and connect to a remote site via openvpn
-* Local site is `192.168.3.0`
-* Local DC (this one) hostname is `LOCALDC` using the host IP of `192.168.3.222`
-* Local existing DC is running DNS and has IP of `192.168.3.201`
-* Local main DNS is running on `192.168.3.1`
-* Remote site is `192.168.6.0`
-* Remote DC hostname is `REMOTEDC` with IP of `192.168.6.222` (notice the DNS and host entries)
-
-```
-version: '2'
-
-networks:
-  extnet:
-    external: true
-
-services:
-
-# ----------- samba begin ----------- #
-
-  samba:
-    image: nowsci/samba-domain
-    container_name: samba
-    volumes:
-      - /etc/localtime:/etc/localtime:ro
-      - /data/docker/containers/samba/data/:/var/lib/samba
-      - /data/docker/containers/samba/config/samba:/etc/samba/external
-      - /data/docker/containers/samba/config/openvpn/docker.ovpn:/docker.ovpn
-      - /data/docker/containers/samba/config/openvpn/credentials:/credentials
-    environment:
-      - DOMAIN=CORP.EXAMPLE.COM
-      - DOMAINPASS=ThisIsMyAdminPassword
-      - JOIN=true
-      - DNSFORWARDER=192.168.3.1
-      - MULTISITE=true
-      - NOCOMPLEXITY=true
-      - INSECURELDAP=true
-      - HOSTIP=192.168.3.222
-    networks:
-      - extnet
-    ports:
-      - 192.168.3.222:53:53
-      - 192.168.3.222:53:53/udp
-      - 192.168.3.222:88:88
-      - 192.168.3.222:88:88/udp
-      - 192.168.3.222:135:135
-      - 192.168.3.222:137-138:137-138/udp
-      - 192.168.3.222:139:139
-      - 192.168.3.222:389:389
-      - 192.168.3.222:389:389/udp
-      - 192.168.3.222:445:445
-      - 192.168.3.222:464:464
-      - 192.168.3.222:464:464/udp
-      - 192.168.3.222:636:636
-      - 192.168.3.222:1024-1044:1024-1044
-      - 192.168.3.222:3268-3269:3268-3269
-    dns_search:
-      - corp.example.com
-    dns:
-      - 192.168.3.222
-      - 192.168.3.1
-      - 192.168.6.222
-      - 192.168.3.201
-    extra_hosts:
-      - localdc.corp.example.com:192.168.3.222
-      - remotedc.corp.example.com:192.168.6.222
-      - remotedc:192.168.6.222
-    hostname: localdc
-    cap_add:
-      - NET_ADMIN
-    devices:
-      - /dev/net/tun
-    privileged: true
-    restart: always
-
-# ----------- samba end ----------- #
-```
-
-## Joining the domain with Ubuntu
-For joining the domain with any client, everything should work just as you would expect if the active directory server was Windows based. For Ubuntu, there are many guides availble for joining, but to make things easier you can find an easily configurable script for joining your domain here: https://raw.githubusercontent.com/Fmstrat/samba-domain/master/ubuntu-join-domain.sh
-
-## Troubleshooting
-
-The most common issue is when running multi-site and seeing the below DNS replication error when checking replication with `docker exec samba samba-tool drs showrepl`
-
-```
-CN=Schema,CN=Configuration,DC=corp,DC=example,DC=local
-        Default-First-Site-Name\REMOTEDC via RPC
-                DSA object GUID: faf297a8-6cd3-4162-b204-1945e4ed5569
-                Last attempt @ Thu Jun 29 10:49:45 2017 EDT failed, result 2 (WERR_BADFILE)
-                4 consecutive failure(s).
-                Last success @ NTTIME(0)
-```
-This has nothing to do with docker, but does happen in samba setups. The key is to put the GUID host entry into the start script for docker, and restart the container. For instance, if you saw the above error, Add this to you docker command:
-```
---add-host faf297a8-6cd3-4162-b204-1945e4ed5569._msdcs.corp.example.com:192.168.6.222 \
-```
-Where `192.168.6.222` is the IP of `REMOTEDC`. You could also do this in `extra_hosts` in docker-compose.
+[![](https://images.microbadger.com/badges/license/instantlinux/samba-dc.svg)](https://microbadger.com/images/instantlinux/samba-dc "License badge")
